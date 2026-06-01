@@ -2,15 +2,19 @@
 set -euo pipefail
 
 # ============================================================
-# Profile Sync — OpenCLaw workspace config backup & deploy
+# Profile Sync — workspace ↔ GitHub 双向同步
 # ============================================================
 
 WORKSPACE="${HOME}/.openclaw/workspace"
 BACKUP_ROOT="${WORKSPACE}/.backup"
 SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-ASSETS_DIR="${SKILL_DIR}/assets"
 
-# Config files managed by this skill (order matters for display)
+# GitHub 远程仓库
+GITHUB_REPO="https://github.com/jackorjack/skills.git"
+GITHUB_BRANCH="main"
+REMOTE_DIR="profile-sync/assets"
+
+# 配置文件列表
 FILES=(
   "AGENTS.md"
   "SOUL.md"
@@ -35,6 +39,7 @@ banner() {
 ok()   { echo "  ✅  ${1}"; }
 warn() { echo "  ⚠️  ${1}"; }
 info() { echo "  ℹ️  ${1}"; }
+fail() { echo "  ❌  ${1}" >&2; exit 1; }
 
 # -- backup --------------------------------------------------
 do_backup() {
@@ -42,7 +47,7 @@ do_backup() {
   local dir="${BACKUP_ROOT}/${target_ts}"
 
   if [[ -d "$dir" ]]; then
-    warn "备份已存在: ${dir}，跳过备份"
+    warn "备份已存在: ${dir}，跳过"
     return 0
   fi
 
@@ -53,11 +58,11 @@ do_backup() {
     local src="${WORKSPACE}/${f}"
     if [[ -f "$src" ]]; then
       cp "$src" "${dir}/${f}"
-      ok "备份: ${f}"
       count=$((count + 1))
     fi
   done
 
+  # 更新 latest 符号链接
   local latest="${BACKUP_ROOT}/latest"
   rm -f "$latest"
   ln -sfn "$dir" "$latest"
@@ -65,64 +70,138 @@ do_backup() {
   if [[ $count -eq 0 ]]; then
     warn "没有文件需要备份"
   else
-    info "备份完成: ${count} 个文件 → ${dir}"
+    ok "备份 ${count} 个文件 → ${dir}"
   fi
 }
 
-# -- apply (backup + replace from assets) --------------------
-do_apply() {
-  banner "备份 → 替换"
+# -- pull: 从 GitHub 下载配置 --------------------------------
+do_pull() {
+  banner "下载配置 (GitHub → Workspace)"
 
-  # 1. backup current
-  do_backup "$now_ts"
+  # 1. 备份当前文件
+  info "备份当前 workspace 配置..."
+  do_backup "pull_${now_ts}"
 
-  # 2. overwrite from assets
+  # 2. 克隆远程仓库到临时目录
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  info "克隆远程仓库..."
+  if ! git clone --depth=1 -b "$GITHUB_BRANCH" "$GITHUB_REPO" "$tmp_dir" 2>/dev/null; then
+    rm -rf "$tmp_dir"
+    fail "克隆仓库失败，请检查网络或仓库地址"
+  fi
+
+  # 3. 检查远程目录是否存在
+  local remote_assets="${tmp_dir}/${REMOTE_DIR}"
+  if [[ ! -d "$remote_assets" ]]; then
+    rm -rf "$tmp_dir"
+    fail "远程仓库中不存在 ${REMOTE_DIR}/ 目录"
+  fi
+
+  # 4. 覆盖 workspace 文件
   echo
   local count=0
+  local missing=0
   for f in "${FILES[@]}"; do
-    local asset="${ASSETS_DIR}/${f}"
+    local src="${remote_assets}/${f}"
     local dest="${WORKSPACE}/${f}"
-    if [[ -f "$asset" ]]; then
-      cp "$asset" "$dest"
-      ok "替换: ${f}"
+    if [[ -f "$src" ]]; then
+      cp "$src" "$dest"
+      ok "下载: ${f}"
+      count=$((count + 1))
+    else
+      warn "远程缺少: ${f}"
+      missing=$((missing + 1))
+    fi
+  done
+
+  # 5. 清理临时目录
+  rm -rf "$tmp_dir"
+
+  echo
+  info "下载完成: ${count} 个文件已同步到 workspace"
+  if [[ $missing -gt 0 ]]; then
+    warn "${missing} 个文件在远程不存在，保留本地版本"
+  fi
+}
+
+# -- push: 上传配置到 GitHub ---------------------------------
+do_push() {
+  banner "上传配置 (Workspace → GitHub)"
+
+  # 1. 检查本地文件
+  local local_count=0
+  for f in "${FILES[@]}"; do
+    if [[ -f "${WORKSPACE}/${f}" ]]; then
+      local_count=$((local_count + 1))
+    fi
+  done
+
+  if [[ $local_count -eq 0 ]]; then
+    fail "workspace 中没有可上传的配置文件"
+  fi
+
+  # 2. 克隆远程仓库
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  info "克隆远程仓库..."
+  if ! git clone --depth=1 -b "$GITHUB_BRANCH" "$GITHUB_REPO" "$tmp_dir" 2>/dev/null; then
+    rm -rf "$tmp_dir"
+    fail "克隆仓库失败，请检查网络或仓库地址"
+  fi
+
+  # 3. 确保目标目录存在
+  local remote_assets="${tmp_dir}/${REMOTE_DIR}"
+  mkdir -p "$remote_assets"
+
+  # 4. 拷贝 workspace 文件到远程目录
+  echo
+  local count=0
+  local changed=0
+  for f in "${FILES[@]}"; do
+    local src="${WORKSPACE}/${f}"
+    local dest="${remote_assets}/${f}"
+    if [[ -f "$src" ]]; then
+      # 检查是否有变化
+      if [[ -f "$dest" ]] && cmp -s "$src" "$dest"; then
+        info "无变化: ${f}"
+      else
+        cp "$src" "$dest"
+        ok "更新: ${f}"
+        changed=$((changed + 1))
+      fi
       count=$((count + 1))
     fi
   done
 
-  echo
-  info "替换完成: ${count} 个文件已从技能 assets 部署到工作区"
-}
-
-# -- diff (preview changes) ----------------------------------
-do_diff() {
-  banner "预览差异 (assets → workspace)"
-
-  local any=0
-  for f in "${FILES[@]}"; do
-    local asset="${ASSETS_DIR}/${f}"
-    local dest="${WORKSPACE}/${f}"
-
-    if [[ ! -f "$asset" ]]; then
-      continue
-    fi
-
-    if [[ ! -f "$dest" ]]; then
-      warn "${f}: 工作区中不存在，将被新建"
-      any=1
-      continue
-    fi
-
-    if ! cmp -s "$asset" "$dest"; then
-      echo "  ── ${f} ──"
-      diff -u "$dest" "$asset" || true
-      echo
-      any=1
-    fi
-  done
-
-  if [[ $any -eq 0 ]]; then
-    ok "没有差异，工作区与 assets 一致"
+  if [[ $changed -eq 0 ]]; then
+    rm -rf "$tmp_dir"
+    echo
+    ok "所有文件已是最新，无需推送"
+    return 0
   fi
+
+  # 5. commit & push
+  echo
+  info "提交变更..."
+  cd "$tmp_dir"
+  git add -A
+  git -c user.name="OpenClaw Bot" -c user.email="bot@openclaw.ai" \
+    commit -m "profile-sync: 更新配置文件 (${changed} files, $(ts))" --quiet
+
+  info "推送到 GitHub..."
+  if git push origin "$GITHUB_BRANCH" 2>/dev/null; then
+    ok "推送成功"
+  else
+    rm -rf "$tmp_dir"
+    fail "推送失败，请检查 GitHub 认证"
+  fi
+
+  # 6. 清理
+  rm -rf "$tmp_dir"
+
+  echo
+  info "上传完成: ${changed} 个文件已推送到 GitHub"
 }
 
 # -- restore -------------------------------------------------
@@ -133,25 +212,20 @@ do_restore() {
   if [[ "$target" == "latest" ]]; then
     dir="${BACKUP_ROOT}/latest"
     if [[ ! -d "$dir" ]]; then
-      echo "错误: 没有可用备份 (${dir} 不存在)" >&2
-      exit 1
+      fail "没有可用备份 (${dir} 不存在)"
     fi
-    # resolve symlink for display
     target=$(readlink "$dir" 2>/dev/null || echo "latest")
     target=$(basename "$target")
   else
     dir="${BACKUP_ROOT}/${target}"
     if [[ ! -d "$dir" ]]; then
-      echo "错误: 备份不存在: ${dir}" >&2
-      echo "可用备份:" >&2
-      do_list >&2
-      exit 1
+      fail "备份不存在: ${dir}"
     fi
   fi
 
   banner "还原备份: ${target}"
 
-  # safety: backup current state first
+  # 还原前先备份
   do_backup "pre_restore_${now_ts}"
 
   echo
@@ -184,13 +258,10 @@ do_list() {
     [[ -d "$d" ]] || continue
     local name
     name=$(basename "$d")
-    # skip "latest" symlink target confusion
-    if [[ "$name" == "latest" ]]; then continue; fi
-    if [[ "$name" == pre_restore_* ]]; then continue; fi
+    [[ "$name" == "latest" ]] && continue
     entries+=("$name")
   done
 
-  # sort descending (newest first)
   if [[ ${#entries[@]} -eq 0 ]]; then
     info "暂无备份"
     return
@@ -205,68 +276,42 @@ do_list() {
   done
 }
 
-# -- update assets from workspace ----------------------------
-do_update_assets() {
-  banner "更新技能 assets (workspace → assets)"
-
-  local count=0
-  for f in "${FILES[@]}"; do
-    local src="${WORKSPACE}/${f}"
-    local dest="${ASSETS_DIR}/${f}"
-    if [[ -f "$src" ]]; then
-      cp "$src" "$dest"
-      ok "更新: ${f}"
-      count=$((count + 1))
-    fi
-  done
-
-  echo
-  info "已从工作区同步 ${count} 个文件到 ${ASSETS_DIR}"
-  info "如需发布，请将变更提交到 Git 仓库"
-}
-
 # -- usage ---------------------------------------------------
 usage() {
   cat <<EOF
 用法: sync.sh <command> [args]
 
-命令:
-  apply          备份当前配置 → 用技能 assets 覆盖工作区
-  backup         仅备份当前工作区配置
-  restore [ts]   还原备份（默认 latest；可指定时间戳）
-  diff           预览 assets 与工作区的差异
+核心命令:
+  pull           从 GitHub 下载配置到 workspace（自动备份）
+  push           将 workspace 配置上传到 GitHub
+
+辅助命令:
   list           列出所有备份
-  update-assets  用工作区当前配置更新技能 assets（发布前使用）
+  restore [ts]   从备份还原（默认最新；可指定时间戳）
 
 示例:
-  sync.sh apply
+  sync.sh pull
+  sync.sh push
+  sync.sh list
   sync.sh restore
   sync.sh restore 2026-01-01_120000
-  sync.sh diff
 EOF
   exit 0
 }
 
 # -- main ----------------------------------------------------
 case "${1:-}" in
-  apply)
-    do_apply
+  pull|download|dl)
+    do_pull
     ;;
-  backup)
-    banner "备份"
-    do_backup "$now_ts"
-    ;;
-  restore)
-    do_restore "${2:-latest}"
-    ;;
-  diff)
-    do_diff
+  push|upload|ul)
+    do_push
     ;;
   list|ls)
     do_list
     ;;
-  update-assets|update_assets)
-    do_update_assets
+  restore)
+    do_restore "${2:-latest}"
     ;;
   -h|--help|help|"")
     usage
