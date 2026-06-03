@@ -1,8 +1,14 @@
 #!/usr/bin/env node
 // 提取抖音视频元数据（video page scraper）
+
+const path = require('path');
+const fs = require('fs');
+
+const STEALTH_NM = path.join(__dirname, '..', '..', 'skills', 'xthezealot-stealth-browser', 'node_modules');
+module.paths.unshift(STEALTH_NM);
+
 const { chromium } = require('playwright-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-const fs = require('fs');
 chromium.use(StealthPlugin());
 
 const VIDEO_ID = process.argv[2] || '7176193748026592547';

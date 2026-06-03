@@ -3,10 +3,15 @@
 // 用法: node search.js <关键词>
 // 退出码: 0=成功 1=缺参数 2=Cookie缺失 3=Cookie过期 4=验证码 5=其他错误
 
+const path = require('path');
+const fs = require('fs');
+
+// 显式指向 xthezealot-stealth-browser 的 node_modules
+const STEALTH_NM = path.join(__dirname, '..', '..', 'skills', 'xthezealot-stealth-browser', 'node_modules');
+module.paths.unshift(STEALTH_NM);
+
 const { chromium } = require('playwright-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-const fs = require('fs');
-const path = require('path');
 chromium.use(StealthPlugin());
 
 const KEYWORD = process.argv[2];

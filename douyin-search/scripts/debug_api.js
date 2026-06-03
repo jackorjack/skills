@@ -1,7 +1,13 @@
 #!/usr/bin/env node
+
+const path = require('path');
+const fs = require('fs');
+
+const STEALTH_NM = path.join(__dirname, '..', '..', 'skills', 'xthezealot-stealth-browser', 'node_modules');
+module.paths.unshift(STEALTH_NM);
+
 const { chromium } = require('playwright-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-const fs = require('fs');
 chromium.use(StealthPlugin());
 
 (async () => {
