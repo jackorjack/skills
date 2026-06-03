@@ -4,7 +4,7 @@
 const path = require('path');
 const fs = require('fs');
 
-const STEALTH_NM = path.join(__dirname, '..', '..', 'skills', 'xthezealot-stealth-browser', 'node_modules');
+const STEALTH_NM = '/home/ubuntu/.openclaw/workspace/skills/xthezealot-stealth-browser/node_modules';
 module.paths.unshift(STEALTH_NM);
 
 const { chromium } = require('playwright-extra');
