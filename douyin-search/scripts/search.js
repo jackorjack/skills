@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // 抖音搜索 — Stealth Browser + Cookie + 评论咨询过滤
-// 用法: node search.js <关键词>
+// 用法: node search.js <关键词> [poolSize] [yearFrom]
+//   poolSize: 可选，搜索池大小（默认 50，最大 100）
+//   yearFrom: 可选，发布年份下限（默认 2022，仅保留该年 1 月 1 日及之后的视频）
 // 退出码: 0=成功 1=缺参数 2=Cookie缺失 3=Cookie过期 4=验证码 5=其他错误
 
 const path = require('path');
@@ -16,7 +18,23 @@ const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 chromium.use(StealthPlugin());
 
 const KEYWORD = process.argv[2];
-if (!KEYWORD) { console.error('用法: node search.js <关键词>'); process.exit(1); }
+if (!KEYWORD) { console.error('用法: node search.js <关键词> [poolSize] [yearFrom]'); process.exit(1); }
+
+// 搜索池大小：默认 50，从命令行参数读取，限制 1~100
+const POOL_SIZE_ARG = parseInt(process.argv[3]);
+const POOL_SIZE_DEFAULT = 50;
+const POOL_SIZE_MAX = 100;
+const POOL_SIZE = Number.isFinite(POOL_SIZE_ARG) && POOL_SIZE_ARG > 0
+  ? Math.min(POOL_SIZE_ARG, POOL_SIZE_MAX)
+  : POOL_SIZE_DEFAULT;
+
+// 发布年份下限：默认 2022，限制 2010~当前年
+const YEAR_FROM_ARG = parseInt(process.argv[4]);
+const YEAR_FROM_DEFAULT = 2022;
+const CURRENT_YEAR = new Date().getFullYear();
+const YEAR_FROM = Number.isFinite(YEAR_FROM_ARG) && YEAR_FROM_ARG >= 2010 && YEAR_FROM_ARG <= CURRENT_YEAR
+  ? YEAR_FROM_ARG
+  : YEAR_FROM_DEFAULT;
 
 const SKILL_DIR = __dirname;
 const COOKIE_FILE = path.join(SKILL_DIR, 'cookie.txt');
@@ -25,13 +43,11 @@ const COOKIE_FILE = path.join(SKILL_DIR, 'cookie.txt');
 
 const SEARCH_API = '/aweme/v1/web/general/search/stream/';
 const COMMENT_API = 'https://www.douyin.com/aweme/v1/web/comment/list/';
-const TOP_N = 20;          // 最终输出条数（全部输出）
-const POOL_SIZE = 20;      // 搜索池大小（从中筛选 top5）
+const TOP_N = 20;          // 最终输出条数
 const COMMENT_COUNT = 15;  // 每个视频拉取评论数
 
-// ── 时间过滤：仅保留 2022 年及以后的视频 ──
-// 2022-01-01 00:00:00 UTC+8 = 1640966400
-const YEAR_CUTOFF = 1640966400;
+// ── 时间过滤：根据 YEAR_FROM 计算 UTC+8 该年 1 月 1 日 0 点的 unix 时间戳 ──
+const YEAR_CUTOFF = Math.floor(Date.UTC(YEAR_FROM, 0, 1) / 1000) - 8 * 3600;
 
 // ── 咨询关键词（制造业 B2B 场景） ──
 
@@ -282,16 +298,17 @@ function formatDuration(sec) {
   return m > 0 ? `${m}:${String(s).padStart(2, '0')}` : `${s}s`;
 }
 
-function formatResults(keyword, videos) {
+function formatResults(keyword, videos, totalSearched) {
   const top = videos.slice(0, TOP_N);
+  const total = totalSearched != null ? totalSearched : videos.length;
   if (top.length === 0) {
     return `### 🔍 抖音搜索「${keyword}」
-> 搜到 ${videos.length} 条，符合 2022 年后条件 0 条`;
+> 搜到 ${total} 条，符合 ${YEAR_FROM} 年后条件 0 条`;
   }
 
   const lines = [];
   lines.push(`### 🔍 抖音搜索「${keyword}」`);
-  lines.push(`> 筛选条件：2022年及以后 | 共搜到 ${videos.length} 条，输出前 ${top.length} 条`);
+  lines.push(`> 筛选条件：${YEAR_FROM}年及以后 | 池容量=${POOL_SIZE} | 共搜到 ${total} 条，输出前 ${top.length} 条`);
   lines.push('');
   lines.push('| # | 视频标题 | 👍点赞 | 💬评论 | ⏱时长 | 👤作者 | 👥粉丝 | 📅发布日期 | 💰咨询意图 |');
   lines.push('|---|----------|--------|--------|--------|--------|--------|------------|------------|');
@@ -335,24 +352,22 @@ async function main() {
     // 2. 注入 Cookie
     await ctx.addCookies(parseLoginCookies(COOKIE_RAW));
 
-    // 3. 搜索 + 拦截 API
+    // 3. 搜索 + 拦截 API（多批拦截，收集足够 POOL_SIZE 条）
     const encoded = encodeURIComponent(KEYWORD);
-    const apiPromise = page.waitForResponse(
-      r => r.url().includes(SEARCH_API) && r.status() === 200,
-      { timeout: 20000 },
-    ).catch(() => null);
+    const apiBodies = [];
+    const onResponse = async (r) => {
+      if (r.url().includes(SEARCH_API) && r.status() === 200) {
+        try { apiBodies.push(await r.text()); } catch (_) {}
+      }
+    };
+    page.on('response', onResponse);
 
     await page.goto(`https://www.douyin.com/search/${encoded}?type=general`, {
       waitUntil: 'domcontentloaded', timeout: 30000,
     });
 
-    const apiResp = await apiPromise;
-    let apiBody = '';
-    if (apiResp) {
-      try { apiBody = await apiResp.text(); } catch (_) {}
-    } else {
-      await page.waitForTimeout(5000);
-    }
+    // 首屏等待
+    await page.waitForTimeout(3000);
 
     // 4. 风控/登录检查
     const title = await page.title();
@@ -363,20 +378,44 @@ async function main() {
     ).catch(() => false);
     if (needLogin) { console.error('COOKIE_EXPIRED'); process.exit(3); }
 
-    // 5. 解析搜索结果
+    // 5. 滚动加载直到收集足够 POOL_SIZE 条或连续未增长
     let videos = [];
-    if (apiBody) {
-      videos = parseSearchResults(apiBody);
-      if (videos.length === 0) videos = parseSearchFallback(apiBody);
-    }
+    let lastCount = 0;
+    let stagnant = 0;
+    const MAX_SCROLLS = 12;
+    for (let i = 0; i < MAX_SCROLLS; i++) {
+      // 解析当前已拦截到的所有响应
+      videos = [];
+      const seen = new Set();
+      for (const body of apiBodies) {
+        let parsed = parseSearchResults(body);
+        if (parsed.length === 0) parsed = parseSearchFallback(body);
+        for (const v of parsed) {
+          if (!seen.has(v.aweme_id)) { seen.add(v.aweme_id); videos.push(v); }
+        }
+      }
+      // 过滤 YEAR_FROM 年以后
+      const valid = videos.filter(v => v.create_time >= YEAR_CUTOFF);
+      if (valid.length >= POOL_SIZE) break;
 
-    if (videos.length === 0) {
-      console.log(JSON.stringify({ keyword: KEYWORD, searched: 0, output: 0, results: [] }, null, 2));
-      return;
-    }
+      // 检查是否连续未增长
+      if (videos.length === lastCount) {
+        stagnant++;
+        if (stagnant >= 3) break;
+      } else {
+        stagnant = 0;
+        lastCount = videos.length;
+      }
 
-    // 6. 过滤：仅保留 2022 年及以后的视频
+      // 滚动触发加载下一页
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+      await page.waitForTimeout(2000);
+    }
+    page.off('response', onResponse);
+
+    // 6. 过滤：仅保留 YEAR_FROM 年及以后的视频
     videos = videos.filter(v => v.create_time >= YEAR_CUTOFF);
+    const totalSearched = videos.length;
 
     if (videos.length === 0) {
       console.log(formatResults(KEYWORD, []));
@@ -387,10 +426,10 @@ async function main() {
     const pool = videos.slice(0, POOL_SIZE);
     const enriched = await enrichWithComments(page, pool);
 
-    // 8. 排序取 top5
+    // 8. 排序取 top20
     const sorted = sortByPriority(enriched);
     sorted.forEach((v, i) => { v.index = i + 1; });
-    console.log(formatResults(KEYWORD, sorted));
+    console.log(formatResults(KEYWORD, sorted, totalSearched));
 
   } finally {
     if (ctx) await ctx.close().catch(() => {});
