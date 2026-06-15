@@ -17,10 +17,22 @@ description: "抖音关键词搜索视频。根据关键词搜索抖音视频，
 6. **排序：有咨询意图优先 → 咨询命中数降序 → 点赞降序 → 取前 20 条**
 7. 输出 Markdown 表格
 
+## 脚本结构
+
+```
+scripts/
+├── lib/common.js       # 公共模块：Cookie/浏览器/格式化
+├── search.js           # 主搜索脚本
+├── video_detail.js     # 视频详情提取（API + DOM 降级）
+├── cookie.txt          # Cookie 文件
+└── references/
+    └── cookie-prompt.md
+```
+
 ## 运行命令
 
 ```bash
-# 默认：池容量 50，年份下限 2022
+# 默认：池容量 50，年份下限 2022，拉取粉丝数
 node scripts/search.js "<关键词>"
 
 # 自定义池容量（1~100）
@@ -28,6 +40,12 @@ node scripts/search.js "<关键词>" 80
 
 # 同时自定义池容量和年份下限
 node scripts/search.js "<关键词>" 80 2024
+
+# 跳过粉丝数拉取（省 40-60s，粉丝列显示 -）
+node scripts/search.js "<关键词>" 50 2022 --no-followers
+
+# 提取单条视频详情
+node scripts/video_detail.js <aweme_id>
 ```
 
 ## 参数说明
@@ -37,6 +55,7 @@ node scripts/search.js "<关键词>" 80 2024
 | 关键词 | 必填 | - | 搜索词 |
 | poolSize | 50 | 1~100 | 搜索池容量，越大越准但耗时越长 |
 | yearFrom | 2022 | 2010~当前年 | 发布年份下限，仅保留该年 1 月 1 日及之后的视频 |
+| --no-followers | 关闭 | - | 跳过粉丝数拉取，节省 40-60 秒，粉丝列显示 `-` |
 
 ## 咨询关键词
 

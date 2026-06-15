@@ -1,27 +1,23 @@
 #!/usr/bin/env node
 // 抖音搜索 — Stealth Browser + Cookie + 评论咨询过滤
-// 用法: node search.js <关键词> [poolSize] [yearFrom]
+// 用法: node search.js <关键词> [poolSize] [yearFrom] [--no-followers]
 //   poolSize: 可选，搜索池大小（默认 50，最大 100）
 //   yearFrom: 可选，发布年份下限（默认 2022，仅保留该年 1 月 1 日及之后的视频）
+//   --no-followers: 跳过粉丝数拉取（省 40-60s，粉丝列显示 -）
 // 退出码: 0=成功 1=缺参数 2=Cookie缺失 3=Cookie过期 4=验证码 5=其他错误
 
-const path = require('path');
-const fs = require('fs');
-const os = require('os');
-
-// 显式指向 xthezealot-stealth-browser 的 node_modules
-const STEALTH_NM = path.join(os.homedir(), '.openclaw', 'workspace', 'skills', 'xthezealot-stealth-browser', 'node_modules');
-module.paths.unshift(STEALTH_NM);
-
-const { chromium } = require('playwright-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-chromium.use(StealthPlugin());
+const { checkCookie, launchBrowser, createContext, setupPage, stripChunkedEncoding, formatNumber, formatDate, formatDuration, checkPageBlocked } = require('./lib/common');
 
 const KEYWORD = process.argv[2];
-if (!KEYWORD) { console.error('用法: node search.js <关键词> [poolSize] [yearFrom]'); process.exit(1); }
+if (!KEYWORD) { console.error('用法: node search.js <关键词> [poolSize] [yearFrom] [--no-followers]'); process.exit(1); }
 
-// 搜索池大小：默认 50，从命令行参数读取，限制 1~100
-const POOL_SIZE_ARG = parseInt(process.argv[3]);
+// 解析标志位
+const NO_FOLLOWERS = process.argv.includes('--no-followers');
+// 过滤掉标志位后取数值参数
+const numArgs = process.argv.slice(2).filter(a => !a.startsWith('--'));
+
+// 搜索池大小：默认 50，限制 1~100
+const POOL_SIZE_ARG = parseInt(numArgs[1]);
 const POOL_SIZE_DEFAULT = 50;
 const POOL_SIZE_MAX = 100;
 const POOL_SIZE = Number.isFinite(POOL_SIZE_ARG) && POOL_SIZE_ARG > 0
@@ -29,15 +25,14 @@ const POOL_SIZE = Number.isFinite(POOL_SIZE_ARG) && POOL_SIZE_ARG > 0
   : POOL_SIZE_DEFAULT;
 
 // 发布年份下限：默认 2022，限制 2010~当前年
-const YEAR_FROM_ARG = parseInt(process.argv[4]);
+const YEAR_FROM_ARG = parseInt(numArgs[2]);
 const YEAR_FROM_DEFAULT = 2022;
 const CURRENT_YEAR = new Date().getFullYear();
 const YEAR_FROM = Number.isFinite(YEAR_FROM_ARG) && YEAR_FROM_ARG >= 2010 && YEAR_FROM_ARG <= CURRENT_YEAR
   ? YEAR_FROM_ARG
   : YEAR_FROM_DEFAULT;
 
-const SKILL_DIR = __dirname;
-const COOKIE_FILE = path.join(SKILL_DIR, 'cookie.txt');
+const COOKIE_RAW = checkCookie();
 
 // ── 配置 ──
 
@@ -70,66 +65,9 @@ const CONSULTATION_KW = [
   '咨询', '请问', '问一下', '了解一下', '介绍下',
 ];
 
-// ── Cookie 键名白名单 ──
-
-const LOGIN_NAMES = new Set([
-  'sessionid','sessionid_ss','sid_guard','sid_tt','uid_tt','uid_tt_ss',
-  'passport_csrf_token','passport_csrf_token_default','passport_auth_mix_state',
-  'passport_assist_user','sid_ucp_v1','ssid_ucp_v1','session_tlb_tag',
-  'is_staff_user','has_biz_token','login_time','IsDouyinActive','n_mh','odin_tt'
-]);
-
-// ── Cookie 检查 ──
-
-function checkCookie() {
-  if (!fs.existsSync(COOKIE_FILE)) { console.error('NO_COOKIE'); process.exit(2); }
-  const raw = fs.readFileSync(COOKIE_FILE, 'utf-8').trim();
-  if (raw.length < 100) { console.error('NO_COOKIE'); process.exit(2); }
-
-  const sidMatch = raw.match(/sid_guard=([^;]+)/);
-  if (sidMatch) {
-    const val = decodeURIComponent(sidMatch[1]);
-    const parts = val.split('|');
-    if (parts.length >= 3) {
-      const expiry = parseInt(parts[1]) + parseInt(parts[2]);
-      if (expiry && (Date.now() / 1000 + 3600) > expiry) {
-        console.error('COOKIE_EXPIRED'); process.exit(3);
-      }
-    }
-  }
-  return raw;
-}
-
-const COOKIE_RAW = checkCookie();
-
-function parseLoginCookies(raw) {
-  return raw.split('; ')
-    .filter(p => LOGIN_NAMES.has(p.split('=')[0].trim()))
-    .map(p => {
-      const idx = p.indexOf('=');
-      return { name: p.substring(0, idx).trim(), value: p.substring(idx + 1), domain: '.douyin.com', path: '/' };
-    });
-}
-
-// ── 剥离 chunked transfer encoding ──
-
-function stripChunkedEncoding(body) {
-  if (!body.startsWith('{')) {
-    // 格式: hex_size\r\nJSON\r\nhex_size\r\nJSON...
-    return body
-      .replace(/^[0-9a-f]+\r\n/gm, '')   // 行首 chunk size
-      .replace(/\r\n[0-9a-f]+\r\n/g, '\n') // 中间 chunk size
-      .replace(/\r\n0\r\n\r\n$/, '');     // 尾部结束标记
-  }
-  return body;
-}
-
 // ── 从 JSON 对象中提取视频列表 ──
 
 function extractVideos(obj, results) {
-  // 兼容多种响应结构:
-  //   {status_code:0, data:[{type:1, aweme_info:{...}}]}
-  //   {data:{aweme_list:[{aweme_info:{...}}]}}
   let items = obj.data || [];
   if (!Array.isArray(items)) {
     items = items.aweme_list || items.data?.aweme_list || [];
@@ -139,7 +77,6 @@ function extractVideos(obj, results) {
     const info = item.aweme_info || item;
     if (!info.aweme_id) continue;
 
-    // video.duration 是毫秒 (> 1000); aweme_info.duration 是秒
     const vdur = info.video?.duration || 0;
     const durSec = vdur > 1000 ? Math.floor(vdur / 1000) : (info.duration || 0);
 
@@ -164,13 +101,11 @@ function parseSearchResults(body) {
   const clean = stripChunkedEncoding(body);
   const results = [];
 
-  // 尝试整段 JSON 解析
   try {
     extractVideos(JSON.parse(clean), results);
     if (results.length > 0) return results;
-  } catch (_) { /* 分段解析 */ }
+  } catch (_) {}
 
-  // 逐行 NDJSON
   const lines = clean.split('\n').filter(l => l.trim());
   for (const line of lines) {
     try { extractVideos(JSON.parse(line), results); } catch (_) {}
@@ -190,7 +125,6 @@ function parseSearchFallback(body) {
   const shares = [...clean.matchAll(/"share_count":(\d+)/g)].map(m => parseInt(m[1]));
   const nicknames = [...clean.matchAll(/"nickname":"((?:[^"\\]|\\.)*)"/g)].map(m => m[1].replace(/\\"/g, '"'));
   const followers = [...clean.matchAll(/"follower_count":(\d+)/g)].map(m => parseInt(m[1]));
-  // duration 取毫秒值 (>100000) 转换为秒，跳过音乐 duration（<1000）
   const allDurations = [...clean.matchAll(/"duration":(\d+)/g)].map(m => parseInt(m[1]));
   const durations = allDurations.map(d => d > 100000 ? Math.floor(d / 1000) : d);
   const dates = [...clean.matchAll(/"create_time":(\d+)/g)].map(m => parseInt(m[1]));
@@ -209,7 +143,11 @@ function parseSearchFallback(body) {
   }));
 }
 
-// ── 评论文本拉取（从浏览器内 fetch，自动携带 Cookie） ──
+// ── 视频详情 API ──
+
+const DETAIL_API = '/aweme/v1/web/aweme/detail/';
+
+// ── 拉取评论（从浏览器内 fetch，自动携带 Cookie） ──
 
 async function fetchCommentText(page, awemeId) {
   const url = `${COMMENT_API}?aweme_id=${awemeId}&cursor=0&count=${COMMENT_COUNT}`;
@@ -219,13 +157,38 @@ async function fetchCommentText(page, awemeId) {
       if (!r.ok) return '';
       return r.text();
     }, url);
-
     const data = JSON.parse(text);
-    const comments = data.comments || [];
-    return comments.map(c => c.text || '').join(' ');
+    return (data.comments || []).map(c => c.text || '').join(' ');
   } catch {
     return '';
   }
+}
+
+// ── 批量拉取粉丝数（需导航到视频页拦截详情 API，串行执行） ──
+
+async function enrichFollowers(page, videos) {
+  const followerMap = {};
+  for (const v of videos) {
+    try {
+      const detailPromise = page.waitForResponse(
+        r => r.url().includes(DETAIL_API) && r.status() === 200,
+        { timeout: 15000 }
+      ).catch(() => null);
+
+      await page.goto(`https://www.douyin.com/video/${v.aweme_id}`, {
+        waitUntil: 'domcontentloaded', timeout: 20000,
+      });
+
+      const resp = await detailPromise;
+      if (resp) {
+        const text = await resp.text();
+        const clean = stripChunkedEncoding(text);
+        const m = clean.match(/"follower_count":(\d+)/);
+        if (m) followerMap[v.aweme_id] = parseInt(m[1]);
+      }
+    } catch (_) {}
+  }
+  return followerMap;
 }
 
 // ── 咨询意图评分 ──
@@ -264,42 +227,20 @@ async function enrichWithComments(page, videos, concurrency = 5) {
   return enriched;
 }
 
-// ── 排序：有咨询优先 → 点赞降序 ──
+// ── 排序：有咨询优先 → 咨询命中数降序 → 点赞降序 ──
 
 function sortByPriority(videos) {
   return videos.sort((a, b) => {
-    // 有咨询意图的排前面
     if (a.has_consultation !== b.has_consultation) return b.has_consultation - a.has_consultation;
-    // 都有咨询 → 按咨询命中数降序
     if (a.consultation_score !== b.consultation_score) return b.consultation_score - a.consultation_score;
-    // 都无咨询或命中相同 → 按点赞降序
     return b.likes - a.likes;
   });
 }
 
 // ── 输出格式化：Markdown 表格 ──
 
-function formatNumber(n) {
-  if (n >= 10000) return `${(n / 10000).toFixed(1)}万`;
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
-  return String(n);
-}
-
-function formatDate(ts) {
-  if (!ts) return '-';
-  const d = new Date(ts * 1000);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
-
-function formatDuration(sec) {
-  if (!sec) return '-';
-  const m = Math.floor(sec / 60);
-  const s = sec % 60;
-  return m > 0 ? `${m}:${String(s).padStart(2, '0')}` : `${s}s`;
-}
-
 function formatResults(keyword, videos, totalSearched) {
-  const top = videos.slice(0, TOP_N);
+  const top = videos;
   const total = totalSearched != null ? totalSearched : videos.length;
   if (top.length === 0) {
     return `### 🔍 抖音搜索「${keyword}」
@@ -317,7 +258,8 @@ function formatResults(keyword, videos, totalSearched) {
     const consultIcon = v.has_consultation ? `✅ ${v.consultation_matched.join('、')}` : '❌ 无';
     const title = (v.desc || '-').substring(0, 50).replace(/\|/g, '｜');
     const author = (v.author_name || '-').replace(/\|/g, '｜');
-    lines.push(`| ${v.index || top.indexOf(v) + 1} | [${title}](${v.url}) | ${formatNumber(v.likes)} | ${formatNumber(v.comments)} | ${formatDuration(v.duration)} | ${author} | ${formatNumber(v.author_followers)} | ${formatDate(v.create_time)} | ${consultIcon} |`);
+    const followers = NO_FOLLOWERS ? '-' : formatNumber(v.author_followers);
+    lines.push(`| ${v.index || top.indexOf(v) + 1} | [${title}](${v.url}) | ${formatNumber(v.likes)} | ${formatNumber(v.comments)} | ${formatDuration(v.duration)} | ${author} | ${followers} | ${formatDate(v.create_time)} | ${consultIcon} |`);
   }
 
   lines.push('');
@@ -328,31 +270,13 @@ function formatResults(keyword, videos, totalSearched) {
 // ── 主流程 ──
 
 async function main() {
-  const browser = await chromium.launch({
-    headless: true,
-    executablePath: '/usr/bin/chromium-browser',
-    args: [
-      '--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage',
-      '--disable-gpu','--window-size=1920,1080','--disable-blink-features=AutomationControlled',
-    ],
-  });
-
+  const browser = await launchBrowser();
   let ctx;
   try {
-    ctx = await browser.newContext({
-      viewport: { width: 1920, height: 1080 },
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    });
-    const page = await ctx.newPage();
+    ctx = await createContext(browser);
+    const page = await setupPage(ctx, COOKIE_RAW);
 
-    // 1. 首页建立信任
-    await page.goto('https://www.douyin.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForTimeout(3000);
-
-    // 2. 注入 Cookie
-    await ctx.addCookies(parseLoginCookies(COOKIE_RAW));
-
-    // 3. 搜索 + 拦截 API（多批拦截，收集足够 POOL_SIZE 条）
+    // 搜索 + 拦截 API（多批拦截，收集足够 POOL_SIZE 条）
     const encoded = encodeURIComponent(KEYWORD);
     const apiBodies = [];
     const onResponse = async (r) => {
@@ -365,26 +289,17 @@ async function main() {
     await page.goto(`https://www.douyin.com/search/${encoded}?type=general`, {
       waitUntil: 'domcontentloaded', timeout: 30000,
     });
-
-    // 首屏等待
     await page.waitForTimeout(3000);
 
-    // 4. 风控/登录检查
-    const title = await page.title();
-    if (title.includes('验证码中间页')) { console.error('CAPTCHA_BLOCKED'); process.exit(4); }
+    // 风控/登录检查
+    await checkPageBlocked(page);
 
-    const needLogin = await page.evaluate(() =>
-      document.body?.innerText?.includes('登录后即可搜索'),
-    ).catch(() => false);
-    if (needLogin) { console.error('COOKIE_EXPIRED'); process.exit(3); }
-
-    // 5. 滚动加载直到收集足够 POOL_SIZE 条或连续未增长
+    // 滚动加载直到收集足够 POOL_SIZE 条或连续未增长
     let videos = [];
     let lastCount = 0;
     let stagnant = 0;
     const MAX_SCROLLS = 12;
     for (let i = 0; i < MAX_SCROLLS; i++) {
-      // 解析当前已拦截到的所有响应
       videos = [];
       const seen = new Set();
       for (const body of apiBodies) {
@@ -394,11 +309,9 @@ async function main() {
           if (!seen.has(v.aweme_id)) { seen.add(v.aweme_id); videos.push(v); }
         }
       }
-      // 过滤 YEAR_FROM 年以后
       const valid = videos.filter(v => v.create_time >= YEAR_CUTOFF);
       if (valid.length >= POOL_SIZE) break;
 
-      // 检查是否连续未增长
       if (videos.length === lastCount) {
         stagnant++;
         if (stagnant >= 3) break;
@@ -407,13 +320,12 @@ async function main() {
         lastCount = videos.length;
       }
 
-      // 滚动触发加载下一页
       await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
       await page.waitForTimeout(2000);
     }
     page.off('response', onResponse);
 
-    // 6. 过滤：仅保留 YEAR_FROM 年及以后的视频
+    // 过滤：仅保留 YEAR_FROM 年及以后的视频
     videos = videos.filter(v => v.create_time >= YEAR_CUTOFF);
     const totalSearched = videos.length;
 
@@ -422,14 +334,24 @@ async function main() {
       return;
     }
 
-    // 7. 取前 POOL_SIZE 条拉评论
+    // 取前 POOL_SIZE 条拉评论
     const pool = videos.slice(0, POOL_SIZE);
     const enriched = await enrichWithComments(page, pool);
 
-    // 8. 排序取 top20
+    // 排序取 top20
     const sorted = sortByPriority(enriched);
     sorted.forEach((v, i) => { v.index = i + 1; });
-    console.log(formatResults(KEYWORD, sorted, totalSearched));
+    const top = sorted.slice(0, TOP_N);
+
+    // 补充粉丝数（仅 top20，需导航到视频页拦截详情 API）
+    if (!NO_FOLLOWERS) {
+      const followerMap = await enrichFollowers(page, top);
+      for (const v of top) {
+        if (followerMap[v.aweme_id]) v.author_followers = followerMap[v.aweme_id];
+      }
+    }
+
+    console.log(formatResults(KEYWORD, top, totalSearched));
 
   } finally {
     if (ctx) await ctx.close().catch(() => {});
