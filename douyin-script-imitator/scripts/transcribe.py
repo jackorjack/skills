@@ -5,13 +5,18 @@ Audio transcription script using SiliconFlow API (硅基流动, 国内直连).
 Usage:
     python3 transcribe.py <SILICONFLOW_API_KEY> /path/to/audio.wav
 
+Environment variables:
+    SILICONFLOW_API_KEY  - SiliconFlow API key (also accepts as positional arg)
+
 Requires: ffmpeg for format conversion (auto-detected)
+Requires: requests library
 """
 
 import argparse
 import subprocess
 import sys
 import os
+import time
 from pathlib import Path
 import requests
 
@@ -53,33 +58,46 @@ def convert_to_wav_if_needed(input_path, output_path="/tmp/transcribe_temp.wav")
         return input_path
 
 
-def transcribe_with_siliconflow(audio_path, api_key):
-    try:
-        with open(audio_path, "rb") as audio_file:
-            response = requests.post(
-                API_URL,
-                headers={"Authorization": f"Bearer {api_key}"},
-                files={"file": audio_file},
-                data={"model": MODEL, "response_format": "text"},
-                proxies=PROXIES,
-                timeout=60
-            )
-        response.raise_for_status()
-        return response.text.strip(), None
-    except requests.exceptions.RequestException as e:
-        error_msg = str(e)
-        if hasattr(e, 'response') and e.response:
-            error_msg = f"{e} - API response: {e.response.text}"
-        return None, f"SiliconFlow API error: {error_msg}"
+def transcribe_with_siliconflow(audio_path, api_key, max_retries=3, retry_interval=5):
+    """SiliconFlow API - SenseVoiceSmall, free"""
+    for attempt in range(1, max_retries + 1):
+        try:
+            with open(audio_path, "rb") as audio_file:
+                response = requests.post(
+                    API_URL,
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    files={"file": audio_file},
+                    data={"model": MODEL, "response_format": "text"},
+                    proxies=PROXIES,
+                    timeout=60
+                )
+            response.raise_for_status()
+            return response.text.strip(), None
+        except requests.exceptions.RequestException as e:
+            error_msg = str(e)
+            if hasattr(e, 'response') and e.response:
+                error_msg = f"{e} - API response: {e.response.text}"
+            if attempt < max_retries:
+                print(f"⚠️ 转写失败（第{attempt}/{max_retries}次），{retry_interval}秒后重试...", file=sys.stderr)
+                print(f"   错误: {error_msg}", file=sys.stderr)
+                time.sleep(retry_interval)
+            else:
+                return None, f"SiliconFlow API error after {max_retries} retries: {error_msg}"
+    return None, "Unknown error"
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="Transcribe audio files using SiliconFlow API"
     )
-    parser.add_argument("api_key", help="SiliconFlow API key")
+    parser.add_argument("api_key", help="SiliconFlow API key (or 'env' to read from env)")
     parser.add_argument("audio_file", help="Path to audio file (ogg, mp3, wav, m4a, etc.)")
     args = parser.parse_args()
+
+    # Resolve API key
+    api_key = args.api_key
+    if api_key == "env" or not api_key:
+        api_key = os.environ.get("SILICONFLOW_API_KEY", "")
 
     input_path = Path(args.audio_file)
     if not input_path.exists():
@@ -98,8 +116,12 @@ def main():
         sys.exit(1)
 
     # Transcribe
-    print(f"Using SiliconFlow API ({MODEL})...", file=sys.stderr)
-    text, error = transcribe_with_siliconflow(audio_path, args.api_key)
+    if api_key:
+        print(f"Using SiliconFlow API ({MODEL})...", file=sys.stderr)
+        text, error = transcribe_with_siliconflow(audio_path, api_key)
+    else:
+        print("⚠️ 未配置 SILICONFLOW_API_KEY", file=sys.stderr)
+        text, error = None, "No API key"
 
     # Cleanup temp file
     temp_file = "/tmp/transcribe_temp.wav"

@@ -1,6 +1,6 @@
 ---
 name: "douyin-script-imitator"
-description: "抖音/短视频脚本仿写。记忆检索企业信息后拆解原视频结构仿写3条脚本。"
+description: "抖音/短视频脚本仿写。记忆检索企业信息后拆解原视频结构仿写3条脚本。观点类视频自动引用IP观点文案库参考。"
 metadata:
   requires:
     bins: [ffmpeg]
@@ -25,16 +25,26 @@ metadata:
 提取：标题、作品描述、标签、内容形式、高频关键词、评论热点词、账号信息（昵称/粉丝/获赞/类型）、点赞/评论/收藏量。
 
 **操作（按优先级）：**
-1. **OpenClaw browser（首选）：** 抖音是纯JS渲染SPA，浏览器是唯一稳定方案。`browser`打开链接→`snapshot`提取信息→`screenshot`截取画面用于第2d步→`act evaluate`提取`<video>.currentSrc`获取视频源地址
-2. **Playwright Stealth 脚本（备选）：** 当OpenClaw browser超时或不稳定时，使用`scripts/fetch_video_detail.js`（需在douyin-search目录下运行以复用node_modules）
-3. **web_fetch（兜底）：** 通常只能拿空壳，效果有限
-4. 短链接（`v.douyin.com/xxx`）浏览器会自动跳转
+1. **Playwright Stealth 脚本（首选）：** 使用`scripts/fetch_video_detail.js`，通过API响应拦截+video元素轮询双保险获取视频真实CDN地址及完整元数据。在本技能目录下直接运行：
+   ```bash
+   cd skills/douyin-script-imitator && node scripts/fetch_video_detail.js <aweme_id或完整URL>
+   ```
+   脚本支持传入 aweme_id 或完整抖音链接（含短链），自动解析。输出 JSON 包含：fullTitle, videoSrc（真实CDN地址）, authorName, followers, likes, comments, shares, publishDate, tags。
 
-**⚠️ 浏览器使用注意事项：**
+2. **OpenClaw browser（备选）：** 当Playwright脚本不可用（如缺依赖）时使用。`browser`打开链接→`snapshot`提取页面信息→`screenshot`截取画面用于第2d步。**注意：** `act evaluate`取`<video>.currentSrc`可能返回blob URL而非真实地址，需轮询等待（见下方注意事项）。
+
+3. **web_fetch（兜底）：** 通常只能拿空壳，效果有限
+
+4. 短链接（`v.douyin.com/xxx`）两种方式都会自动跳转
+
+5. 获取视频链接的时候不要向用户输出登录的截图
+
+**⚠️ 浏览器使用注意事项（OpenClaw browser备选时）：**
 - 抖音页面是重SPA，标签页堆积会导致CDP超时。操作前先检查并清理多余标签页（`browser tabs`查看，关闭非必要页面）
 - 每次操作完成后立即关闭标签页，避免残留
 - 如果snapshot/evaluate超时，先清理标签页再重试
-- 视频源地址需用`act evaluate`从`<video>.currentSrc`获取，snapshot中不包含
+- `<video>.currentSrc`在视频初始化阶段返回`blob:` URL，需等待MSE加载完成后才会更新为真实CDN地址。如果取到blob URL，等2-3秒再取一次
+- snapshot中不包含video源地址，必须用`act evaluate`提取
 
 **标题与作品描述的区分规则：**
 
@@ -59,11 +69,24 @@ metadata:
 
 #### 2a. 获取视频源地址并下载视频
 
-**获取视频源地址：**
-用`browser act evaluate`从页面提取：
+**获取视频源地址（按优先级）：**
+
+**方式1（首选）：直接使用第1步 Playwright 脚本输出的 videoSrc 字段**
+如果第1步用 `fetch_video_detail.js` 获取的元数据，JSON 中的 `videoSrc` 已经是真实 CDN 地址，直接用。
+
+**方式2（备选）：OpenClaw browser evaluate**
+用`browser act evaluate`从页面提取，需轮询等待 blob 消失：
 ```javascript
-document.querySelector('video')?.currentSrc || document.querySelector('video')?.src || ''
+// 第一次取可能是 blob:，需等2-3秒重试
+const src = document.querySelector('video')?.currentSrc || document.querySelector('video')?.src || ''
+// 如果返回 blob: 开头，等2-3秒再取一次
 ```
+
+**方式3（兜底）：单独运行 Playwright 脚本**
+```bash
+cd skills/douyin-script-imitator && node scripts/fetch_video_detail.js <aweme_id或URL>
+```
+脚本通过API拦截+video轮询双保险获取真实地址。
 
 **下载视频：**
 ```bash
@@ -71,12 +94,8 @@ curl -L -o /tmp/douyin_video.mp4 "<视频下载地址>" -H "User-Agent: Mozilla/
 ```
 
 **降级方案：**
-- curl 403 → 检查视频源URL是否已过期，重新从页面获取
-- OpenClaw browser整体不可用 → 使用Playwright Stealth脚本`scripts/fetch_video_detail.js`获取视频源，需在douyin-search目录下运行：
-  ```bash
-  cd skills/douyin-search && node scripts/fetch_video_detail.js <aweme_id>
-  ```
-  注意：该脚本依赖`playwright-extra`和`puppeteer-extra-plugin-stealth`，仅在douyin-search目录下有node_modules
+- curl 403 → 检查视频源URL是否已过期，重新获取
+- 以上方式全部失败 → 回退到页面字幕/描述提取，跳过音频转写
 
 #### 2b. 提取音频
 ```bash
@@ -88,7 +107,7 @@ ffmpeg -y -i /tmp/douyin_video.mp4 -acodec pcm_s16le -ar 16000 -ac 1 /tmp/douyin
 ```bash
 python3 scripts/transcribe.py $SILICONFLOW_API_KEY /tmp/douyin_audio.wav
 ```
-API失败或纯音乐→回退到页面字幕/描述提取。SiliconFlow API偶发500错误，建议重试2-3次（间隔3秒）。
+SiliconFlow API偶发500错误，脚本已内置重试逻辑（间隔5秒，最多3次）。如全部失败→回退到页面字幕/描述提取，跳过音频转写。
 
 #### 2d. 画面分析
 用`browser screenshot`截取画面，提取画面内容（场景/动作）和画面特点（运镜/景别/转场）。
@@ -114,12 +133,48 @@ API失败或纯音乐→回退到页面字幕/描述提取。SiliconFlow API偶�
 
 **压缩为≤150字摘要**，用于仿写参考。
 
-### 第4步：拆解原视频结构
+### 第4步：识别视频类型并拆解结构
+
+#### 4a. 判断视频类型
+
+根据原视频内容判断类型，分为两大类：
+
+**产品/业务类**：展示产品、工厂、服务、案例，以获客转化为目的
+- 特征：讲产品卖点、应用场景、客户案例、工厂实力、生产工艺
+- 技巧：数字法、对比法、场景法、痛点法
+
+**观点/IP类**：输出行业观点、认知、经验，以建立人设和信任为目的
+- 特征：讲行业现状/趋势/误区、创业经历、经营理念、反常识观点
+- 技巧：反常识法、共情法、权威法、故事法、对比法
+- 典型场景：老板出镜口播、行业认知输出、避坑指南、经验分享
+
+#### 4b. 观点类视频 → 检索 IP 观点文案参考库
+
+**仅当原视频为观点/IP类时执行此步。**
+
+从 memory 检索企盛 IP 观点文案库，找到风格/结构最接近的参考文案：
+
+```bash
+memory_search query="原视频核心观点关键词 IP观点" corpus=memory maxResults=5
+```
+
+**检索策略：**
+1. 提取原视频的核心观点关键词（1-3个词），组合 "IP观点" 一起搜索
+2. 若首轮命中不足，换关键词再搜一轮
+3. 用 `memory_get` 拉取最匹配的 1-2 条完整文案作为仿写参考
+
+**参考维度：**
+- 观点切入角度（反常识/行业洞察/经验总结）
+- 论述结构（观点→论证→案例→总结）
+- 语言风格（犀利/沉稳/共情/权威）
+- 钩子类型（反常识/痛点/数据/故事）
+
+#### 4c. 拆解原视频结构
 
 逐句拆解，格式：`句N：[原文] → [功能] → [技巧]`
 
 功能：钩子/痛点/共鸣/方案/卖点/信任/引导/CTA
-技巧：数字法/对比法/场景法/反问法/共情法/权威法/紧迫法/利益法
+技巧：数字法/对比法/场景法/反问法/共情法/权威法/紧迫法/利益法/反常识法/故事法
 
 ### 第5步：仿写3条视频脚本
 
@@ -129,10 +184,18 @@ API失败或纯音乐→回退到页面字幕/描述提取。SiliconFlow API偶�
 - 每句「功能」和「技巧」与原视频一致
 - 内容替换为企业产品/卖点/场景/客户/数据
 - 融入企业核心卖点和差异化优势
+- **观点类视频额外要求**：仿写时融合第4b步检索到的 IP 观点文案的论述风格和切入角度，保持观点输出的深度和专业感
 - 仿写后必须通顺,拗口/生硬必须调整，宁可多一字不可卡一秒
 - 标签：围绕品牌+产品+行业+人群+热点关键词
 - 目标用户：文案针对客户人群，注意人称
 - 每条脚本选不同角度，参考`references/script-angles.md`选3个。
+
+**仿写角度选择（观点类 vs 产品类）：**
+
+| 类型 | 优先角度 | 说明 |
+|------|---------|------|
+| 观点/IP类 | 反常识、行业揭秘、故事共鸣、对比碾压 | 侧重观点输出和认知建立 |
+| 产品/业务类 | 痛点放大、卖点直击、场景代入、数据说话 | 侧重获客转化和信任建立 |
 
 **仿写前按原视频风格只读1个示例文件,也作为仿写的参考：**
 - 大字报（口播展示卖点）→ `references/imitation-example-oral.md`
