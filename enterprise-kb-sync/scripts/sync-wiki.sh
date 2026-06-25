@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -eu
 
 WIKI_DIR="${HOME}/.openclaw/workspace/wiki"
 LOCK_FILE="/tmp/sync-wiki.lock"
@@ -64,7 +64,29 @@ size = os.path.getsize(md_path)
 print(f'  ✅ 完成 {os.path.basename(md_path)} ({len(lines)} 行, {size:,} 字节)')
 "
 
+  # 清洗：加元数据头 + 拆大文件 + 整理标题
+  echo "  🧹 清洗: $(basename "$md")"
+  python3 "${HOME}/.openclaw/workspace/skills/enterprise-kb-sync/scripts/clean-wiki.py" "$md" || {
+    echo "  ⚠️  清洗失败，保留原文件"
+  }
+
   converted=$((converted + 1))
+done
+
+# 清洗子目录中的 md 文件（如 客户案例/ 等），跳过自动拆分产生的子目录
+for subdir in "${WIKI_DIR}"/*/; do
+  [ -d "$subdir" ] || continue
+  subdir_name=$(basename "$subdir")
+  # 跳过由 clean-wiki.py 拆分产生的子目录（名称与某个 md 文件同名）
+  if [ -f "${WIKI_DIR}/${subdir_name}.md" ]; then
+    echo "  ⏭  跳过拆分目录: ${subdir_name}/"
+    continue
+  fi
+  for md in "$subdir"*.md; do
+    [ -f "$md" ] || continue
+    echo "  🧹 清洗: ${md#$WIKI_DIR/}"
+    python3 "${HOME}/.openclaw/workspace/skills/enterprise-kb-sync/scripts/clean-wiki.py" "$md" || true
+  done
 done
 
 if [ "$converted" -gt 0 ]; then
