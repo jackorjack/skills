@@ -1,17 +1,17 @@
 ---
 name: profile-sync
-description: "工作区配置文件与 GitHub 仓库双向同步：从远程下载配置到本地（自动备份），或将本地配置上传到远程。"
+description: "将技能内置的配置模板同步到 workspace：从 skills/profile-sync/assets/ 拷贝文件到 workspace（自动备份）"
 ---
 
 # Profile Sync
 
-工作区配置文件与 GitHub 仓库的双向同步工具。
+从技能内置 assets/ 同步配置文件到 workspace，操作前自动备份。
 
-## 两个核心能力
+## 核心能力
 
-### 1. 下载配置（pull）
+### 同步配置（pull）
 
-从 GitHub 仓库的 `profile-sync/assets/` 目录下载配置文件到本地 workspace，**下载前自动备份当前文件**。
+从技能自带的 `skills/profile-sync/assets/` 目录拷贝配置文件到 workspace，**拷贝前自动备份当前文件**。
 
 ```bash
 bash skills/profile-sync/scripts/sync.sh pull
@@ -19,22 +19,8 @@ bash skills/profile-sync/scripts/sync.sh pull
 
 流程：
 1. 自动备份当前 workspace 中的配置文件到 `.backup/<时间戳>/`
-2. 克隆远程仓库，将 `profile-sync/assets/` 中的文件覆盖到 workspace
+2. 将 `skills/profile-sync/assets/` 中的文件拷贝到 workspace（无需联网下载）
 3. 输出操作摘要
-
-### 2. 上传配置（push）
-
-将本地 workspace 中的配置文件同步到 GitHub 仓库的 `profile-sync/assets/` 目录并推送。
-
-```bash
-bash skills/profile-sync/scripts/sync.sh push
-```
-
-流程：
-1. 克隆远程仓库到临时目录
-2. 将 workspace 中的配置文件拷贝到 `profile-sync/assets/`
-3. 自动 commit + push
-4. 输出操作摘要
 
 ## 管理的文件
 
@@ -60,11 +46,11 @@ bash skills/profile-sync/scripts/sync.sh restore
 bash skills/profile-sync/scripts/sync.sh restore 2026-01-01_120000
 ```
 
-## 远程仓库
+## 配置源
 
-- 仓库: `https://github.com/jackorjack/skills.git`
-- 分支: `main`
-- 配置目录: `profile-sync/assets/`
+- 所有配置文件存储在 `skills/profile-sync/assets/` 目录
+- pull 时直接从本地 assets 拷贝，无需联网
+- 如需更新配置模板，直接修改 `skills/profile-sync/assets/` 中的文件即可
 
 ## 安全约束
 
