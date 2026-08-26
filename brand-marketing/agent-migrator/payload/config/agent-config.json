@@ -1,0 +1,21 @@
+{
+  "id": "brand-marketing",
+  "name": "企业品牌营销",
+  "description": "企业品牌营销内容专员，geo 文章生成,仿写",
+  "workspace": "/home/ubuntu/.openclaw/workspace-brand-marketing",
+  "skills": [
+    "yao-geo-explainer-builder",
+    "yao-geo-ranking-article-builder",
+    "yao-geo-comparison-builder",
+    "yao-geo-content-refiner",
+    "yao-geo-article-friendly",
+    "yao-geo-title-optimizer",
+    "wechat-typeset-publish",
+    "khazix-writer"
+  ],
+  "memorySearch": {
+    "extraPaths": [
+      "/home/ubuntu/.openclaw/workspace/wiki"
+    ]
+  }
+}

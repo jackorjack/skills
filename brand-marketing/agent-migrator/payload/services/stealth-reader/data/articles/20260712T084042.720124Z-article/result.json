@@ -1,0 +1,15 @@
+{
+  "status": "RETRYABLE",
+  "requested_url": "https://www.cnblogs.com/1689-20260616/p/20137569",
+  "final_url": null,
+  "title": null,
+  "account": null,
+  "author": null,
+  "published_at": null,
+  "content_html": null,
+  "content_markdown": null,
+  "artifact_dir": "/home/ubuntu/.openclaw/workspace-brand-marketing/services/wechat-reader/data/articles/20260712T084042.720124Z-article",
+  "screenshot": null,
+  "message": "TypeError: BrowserContext.new_page() got an unexpected keyword argument 'ignore_https_errors'",
+  "observed_markers": []
+}

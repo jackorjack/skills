@@ -1,0 +1,15 @@
+{
+  "status": "RETRYABLE",
+  "requested_url": "https://mp.weixin.qq.com/s/BIhl1KnpVpyyY-W7eJD18g",
+  "final_url": null,
+  "title": null,
+  "account": null,
+  "author": null,
+  "published_at": null,
+  "content_html": null,
+  "content_markdown": null,
+  "artifact_dir": "/home/ubuntu/.openclaw/workspace-brand-marketing/services/wechat-reader/data/articles/20260710T130957.236093Z-wechat",
+  "screenshot": null,
+  "message": "InvalidAddonPath: manifest.json is missing. Addon path must be a path to an extracted addon.",
+  "observed_markers": []
+}
