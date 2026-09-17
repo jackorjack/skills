@@ -18,6 +18,7 @@ FILES=(
   "IDENTITY.md"
   "TOOLS.md"
   "HEARTBEAT.md"
+  "MEMORY.md"
 )
 
 # -- helpers -------------------------------------------------
@@ -215,4 +216,3 @@ case "${1:-}" in
     usage
     ;;
 esac
-                                                                                                                                                                 219,1         Bot
