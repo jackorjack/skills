@@ -38,22 +38,29 @@ echo "==> [5/6] 导出 Agent 配置和 Nginx 配置"
 # 导出 gateway config 中 agents 段（需要手动执行，这里存提示）
 cat > "$STAGE/config/agent-config.json" << 'CONFIG_EOF'
 {
-  "id": "brand-marketing",
-  "name": "企业品牌营销",
-  "description": "企业品牌营销内容专员，geo 文章生成,仿写",
-  "workspace": "/home/ubuntu/.openclaw/workspace-brand-marketing",
-  "skills": [
-    "yao-geo-explainer-builder",
-    "yao-geo-ranking-article-builder",
-    "yao-geo-comparison-builder",
-    "yao-geo-content-refiner",
-    "yao-geo-article-friendly",
-    "yao-geo-title-optimizer",
-    "wechat-typeset-publish",
-    "khazix-writer"
-  ],
-  "memorySearch": {
-    "extraPaths": ["/home/ubuntu/.openclaw/workspace/wiki"]
+  "agents": {
+    "entries": {
+      "brand-marketing": {
+        "name": "企业品牌营销",
+        "description": "企业品牌营销内容专员，geo 文章生成,仿写",
+        "workspace": "/home/ubuntu/.openclaw/workspace-brand-marketing",
+        "skills": [
+          "yao-geo-explainer-builder",
+          "yao-geo-ranking-article-builder",
+          "yao-geo-comparison-builder",
+          "yao-geo-content-refiner",
+          "yao-geo-article-friendly",
+          "yao-geo-title-optimizer",
+          "wechat-typeset-publish",
+          "khazix-writer"
+        ],
+        "memory": {
+          "search": {
+            "extraPaths": ["/home/ubuntu/.openclaw/workspace/wiki"]
+          }
+        }
+      }
+    }
   }
 }
 CONFIG_EOF
@@ -96,9 +103,9 @@ cp -r /tmp/agent-migration-stage/workspace /home/ubuntu/.openclaw/workspace-bran
 ### 4. 配置 Agent
 将 `config/agent-config.json` 中的配置合并到 OpenClaw gateway config：
 ```bash
-openclaw gateway config-edit
+openclaw config patch --file config/agent-config.json
 ```
-在 `agents.list` 中添加该 agent 条目。
+该补丁使用 2026.9.4 的 `agents.entries` 结构，不要改回已移除的旧版数组结构或旧版内存字段。
 
 ### 5. 创建 Stealth Reader 虚拟环境
 ```bash
@@ -119,8 +126,9 @@ mkdir -p /home/ubuntu/geo
 cp -r /tmp/agent-migration-stage/wiki /home/ubuntu/.openclaw/workspace/wiki
 ```
 
-### 8. 重启 OpenClaw
+### 8. 根据配置命令输出决定是否需要重启
 ```bash
+# agents.entries 配置通常支持热加载；只有命令提示时才重启
 openclaw gateway restart
 ```
 GUIDE_EOF

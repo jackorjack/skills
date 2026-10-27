@@ -46,8 +46,6 @@ for f in AGENTS.md SOUL.md IDENTITY.md MEMORY.md TOOLS.md USER.md HEARTBEAT.md; 
     echo "  ✓ $f"
   fi
 done
-[ -f "$PAYLOAD/workspace/openclaw-workspace-state.json" ] && \
-  cp "$PAYLOAD/workspace/openclaw-workspace-state.json" "$WORKSPACE_DIR/"
 
 step 3 "部署技能包"
 if [ -d "$PAYLOAD/skills" ]; then
@@ -107,14 +105,13 @@ echo "   vi ${WORKSPACE_DIR}/MEMORY.md"
 echo "   vi ${WORKSPACE_DIR}/AGENTS.md"
 echo ""
 echo "2. 注册 Agent 到 Gateway Config:"
-echo "   openclaw gateway config-edit"
+echo "   openclaw config patch --file ${PAYLOAD}/config/agent-config.json"
 if [ -f "$PAYLOAD/config/agent-config.json" ]; then
   echo ""
-  echo "   添加以下条目到 agents.list:"
+  echo "   将以下配置补丁应用到 agents.entries（2026.9.4 schema）:"
   cat "$PAYLOAD/config/agent-config.json"
 fi
 echo ""
-echo "3. 重启 OpenClaw:"
-echo "   openclaw gateway restart"
+echo "3. 根据配置命令输出决定是否需要重启"
 echo ""
 echo -e "${CYAN}部署完毕！${NC}"

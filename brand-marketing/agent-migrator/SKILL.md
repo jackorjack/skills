@@ -25,9 +25,9 @@ ls {技能目录}/payload/ 2>/dev/null && echo "DEPLOY" || echo "BUILD"
 
 ### Step 1: 获取 agent 配置
 ```bash
-gateway action=config.get path=agents.list
+gateway action=config.get path=agents.entries
 ```
-找到当前 agent（brand-marketing），记录 workspace 路径和 wiki 路径。
+找到当前 agent（brand-marketing），记录 `workspace`、`skills` 和 `memory.search.extraPaths`。
 
 ### Step 2: 创建 payload 目录结构
 ```bash
@@ -38,7 +38,7 @@ mkdir -p $SKILL_DIR/payload/{workspace,skills,scripts,services,wiki,config}
 
 ### Step 3: 收集 workspace 配置文件
 ```bash
-for f in AGENTS.md SOUL.md IDENTITY.md MEMORY.md TOOLS.md USER.md HEARTBEAT.md openclaw-workspace-state.json; do
+for f in AGENTS.md SOUL.md IDENTITY.md MEMORY.md TOOLS.md USER.md HEARTBEAT.md; do
   [ -f "{workspace}/$f" ] && cp "{workspace}/$f" "$SKILL_DIR/payload/workspace/"
 done
 ```
@@ -67,12 +67,12 @@ done
 
 ### Step 7: 复制知识库
 ```bash
-WIKI={memorySearch.extraPaths[0]}
+WIKI={agents.entries.<agent>.memory.search.extraPaths[0]}
 [ -d "$WIKI" ] && cp "$WIKI"/* $SKILL_DIR/payload/wiki/
 ```
 
 ### Step 8: 写入 agent 配置 JSON
-将 gateway config 中当前 agent 配置项写入 `$SKILL_DIR/payload/config/agent-config.json`。
+将 gateway config 中当前 `agents.entries.<agent>` 配置项写入 `$SKILL_DIR/payload/config/agent-config.json`，保存为可直接用于 `openclaw config patch` 的配置补丁。
 
 ### Step 9: 打包传输
 ```bash
@@ -153,13 +153,13 @@ chown -R ubuntu:ubuntu "$WORKSPACE_DIR" "$WIKI_DIR" "$GEO_DIR" 2>/dev/null || tr
 ```
 
 ### Step 9: 输出 agent 注册 JSON
-读取 `payload/config/agent-config.json` 并展示给用户，提示添加到 gateway config 的 agents.list。
+读取 `payload/config/agent-config.json` 并展示给用户，提示使用当前版本的 `openclaw config patch` 写入 `agents.entries`；不要使用已移除的旧版数组结构或旧版内存字段。
 
 ### Step 10: 后续步骤提示
 ```
 1. 修改企业信息: vi {WORKSPACE_DIR}/MEMORY.md 和 AGENTS.md
-2. 注册 Agent: 将 agent-config.json 添加到 gateway config 的 agents.list
-3. 重启: openclaw gateway restart
+2. 注册 Agent: 使用 `openclaw config patch --file agent-config.json` 写入当前 Gateway 配置
+3. 根据命令输出决定是否需要重启；2026.9.4 的 `agents.entries` 修改通常热加载
 ```
 
 ---
