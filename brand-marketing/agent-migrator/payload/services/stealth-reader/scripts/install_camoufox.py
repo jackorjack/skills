@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Resumable, official-source installer for the pinned Camoufox browser."""
+"""Resumable, official-source installer for the Camoufox browser.
+
+No browser version is hard-coded. The installed ``camoufox`` package decides which build to
+install, exactly as ``python -m camoufox fetch`` would, so the browser always matches the
+library. This script only replaces that command's single-connection download with a
+resumable, multi-connection one from GitHub's release CDN, validates the archive, and hands
+it to the library's own installer (layout, checksum, metadata).
+
+If the GitHub API rate limit (HTTP 403) is hit while the release is looked up, retry later or
+set GITHUB_TOKEN.
+"""
 
 from __future__ import annotations
 
@@ -7,38 +17,35 @@ import argparse
 import concurrent.futures
 import json
 import os
+import re
 import shutil
 import stat
+import tempfile
 import threading
 import time
 from pathlib import Path, PurePosixPath
+from typing import IO
+from urllib.parse import urljoin, urlsplit
 from zipfile import ZipFile
 
 import requests
-from camoufox.pkgman import CamoufoxFetcher, INSTALL_DIR, launch_path
+from camoufox.pkgman import INSTALL_DIR, CamoufoxFetcher, launch_path
 
 
-REPOSITORY = "daijro/camoufox"
-VERSION = "135.0.1"
-RELEASE = "beta.24"
-ASSET_NAME = f"camoufox-{VERSION}-{RELEASE}-lin.x86_64.zip"
-EXPECTED_SIZE = 712_711_368
-API_URL = f"https://api.github.com/repos/{REPOSITORY}/releases/tags/v{VERSION}-{RELEASE}"
-ACCEPT = "application/octet-stream"
+ALLOWED_SCHEMES = ("https",)
+# github.com hands release downloads to a signed URL on one of these hosts; follow no other.
+REDIRECT_HOSTS = ("github.com",)
+DOWNLOAD_HOSTS = ("release-assets.githubusercontent.com", "objects.githubusercontent.com")
+ARCHIVE_NAME = re.compile(r"[A-Za-z0-9._-]+\.zip")
+MAX_REDIRECTS = 3
+SPACE_MARGIN = 256 * 1024 * 1024
 
 
 class OfficialAsset:
-    def __init__(self) -> None:
-        response = requests.get(API_URL, timeout=30)
-        response.raise_for_status()
-        matches = [asset for asset in response.json()["assets"] if asset["name"] == ASSET_NAME]
-        if len(matches) != 1:
-            raise RuntimeError(f"Expected one official asset named {ASSET_NAME}, found {len(matches)}")
-        self.data = matches[0]
-        if self.data["size"] != EXPECTED_SIZE:
-            raise RuntimeError(
-                f"Official API size changed: {self.data['size']} != {EXPECTED_SIZE}"
-            )
+    """One release archive; hands out short-lived signed URLs on GitHub's download host."""
+
+    def __init__(self, url: str) -> None:
+        self.url = url
         self._lock = threading.Lock()
         self._signed_url: str | None = None
         self._signed_at = 0.0
@@ -47,20 +54,45 @@ class OfficialAsset:
         with self._lock:
             if not force and self._signed_url and time.monotonic() - self._signed_at < 40 * 60:
                 return self._signed_url
-            response = requests.get(
-                self.data["url"],
-                headers={"Accept": ACCEPT},
-                allow_redirects=False,
-                timeout=30,
-            )
-            if response.status_code not in (301, 302, 303, 307, 308):
-                raise RuntimeError(f"Official asset API returned HTTP {response.status_code}")
-            location = response.headers.get("location")
-            if not location or not location.startswith("https://release-assets.githubusercontent.com/"):
-                raise RuntimeError("Official asset API returned an unexpected download host")
-            self._signed_url = location
+            self._signed_url = self._resolve()
             self._signed_at = time.monotonic()
-            return location
+            return self._signed_url
+
+    def _resolve(self) -> str:
+        current = self.url
+        for _ in range(MAX_REDIRECTS):
+            parts = urlsplit(current)
+            if parts.scheme not in ALLOWED_SCHEMES:
+                raise RuntimeError(f"Refusing non-HTTPS release URL (host {parts.hostname})")
+            if parts.hostname in DOWNLOAD_HOSTS:
+                return current
+            if parts.hostname not in REDIRECT_HOSTS:
+                raise RuntimeError(f"Release URL points at an unexpected host: {parts.hostname}")
+            response = requests.get(current, allow_redirects=False, stream=True, timeout=30)
+            response.close()
+            location = response.headers.get("location")
+            if response.status_code not in (301, 302, 303, 307, 308) or not location:
+                raise RuntimeError(
+                    f"Release URL did not redirect to a download host (HTTP {response.status_code})"
+                )
+            current = urljoin(current, location)
+        raise RuntimeError("Release URL redirected too many times")
+
+
+def probe_size(asset: OfficialAsset) -> int:
+    """Archive size as reported by the download host itself (also proves it honours Range)."""
+    response = requests.get(
+        asset.signed_url(), headers={"Range": "bytes=0-0"}, stream=True, timeout=30
+    )
+    try:
+        if response.status_code != 206:
+            raise RuntimeError(f"Download host ignores Range requests (HTTP {response.status_code})")
+        match = re.fullmatch(r"bytes 0-0/(\d+)", response.headers.get("content-range", ""))
+        if not match:
+            raise RuntimeError("Download host sent no usable Content-Range")
+        return int(match.group(1))
+    finally:
+        response.close()
 
 
 def download_part(
@@ -111,17 +143,20 @@ def download_part(
     raise RuntimeError(f"Part {part_path.name} incomplete: {current}/{expected}")
 
 
-def download(asset: OfficialAsset, output: Path, workers: int) -> None:
-    parts_dir = output.parent / "parts"
+def download(asset: OfficialAsset, output: Path, total: int, workers: int) -> None:
+    # Keyed by archive name and size, so leftovers of another release are never resumed into this one.
+    parts_dir = output.parent / f"{output.name}.{total}.parts"
     parts_dir.mkdir(parents=True, exist_ok=True)
-    chunk = (EXPECTED_SIZE + workers - 1) // workers
+    chunk = (total + workers - 1) // workers
     jobs: list[tuple[Path, int, int]] = []
     for index in range(workers):
         start = index * chunk
-        end = min(start + chunk - 1, EXPECTED_SIZE - 1)
+        if start >= total:
+            break
+        end = min(start + chunk - 1, total - 1)
         jobs.append((parts_dir / f"part.{index:03d}", start, end))
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs)) as executor:
         futures = {
             executor.submit(download_part, asset, path, start, end): path
             for path, start, end in jobs
@@ -136,15 +171,15 @@ def download(asset: OfficialAsset, output: Path, workers: int) -> None:
         for path, _, _ in jobs:
             with path.open("rb") as source:
                 shutil.copyfileobj(source, assembled, length=1024 * 1024)
-    if temporary.stat().st_size != EXPECTED_SIZE:
-        raise RuntimeError(f"Assembled size is {temporary.stat().st_size}, expected {EXPECTED_SIZE}")
+    if temporary.stat().st_size != total:
+        raise RuntimeError(f"Assembled size is {temporary.stat().st_size}, expected {total}")
     temporary.replace(output)
     shutil.rmtree(parts_dir)
 
 
-def validate_zip(archive: Path) -> int:
-    if archive.stat().st_size != EXPECTED_SIZE:
-        raise RuntimeError(f"Archive size is {archive.stat().st_size}, expected {EXPECTED_SIZE}")
+def validate_zip(archive: Path, expected_size: int) -> int:
+    if archive.stat().st_size != expected_size:
+        raise RuntimeError(f"Archive size is {archive.stat().st_size}, expected {expected_size}")
     total_uncompressed = 0
     with ZipFile(archive) as package:
         for member in package.infolist():
@@ -162,54 +197,123 @@ def validate_zip(archive: Path) -> int:
     return total_uncompressed
 
 
-def install(archive: Path, uncompressed_size: int) -> None:
-    free = shutil.disk_usage(INSTALL_DIR.parent).free
-    if free < uncompressed_size + 256 * 1024 * 1024:
-        raise RuntimeError(
-            f"Insufficient space: {free} bytes free, need at least "
-            f"{uncompressed_size + 256 * 1024 * 1024}"
-        )
-    fetcher = CamoufoxFetcher()
-    if fetcher.version != VERSION or fetcher.release != RELEASE:
-        raise RuntimeError(f"Package manager selected unexpected version {fetcher.verstr}")
-    fetcher.cleanup()
-    try:
-        INSTALL_DIR.mkdir(parents=True, exist_ok=True)
+def check_free_space(needs: list[tuple[Path, int]]) -> None:
+    """Each entry is (directory, bytes needed there); directories on one device are summed."""
+    per_device: dict[int, list] = {}
+    for directory, needed in needs:
+        entry = per_device.setdefault(directory.stat().st_dev, [directory, 0])
+        entry[1] += needed
+    for directory, needed in per_device.values():
+        free = shutil.disk_usage(directory).free
+        if free < needed + SPACE_MARGIN:
+            raise RuntimeError(
+                f"Insufficient space under {directory}: {free} bytes free, "
+                f"need at least {needed + SPACE_MARGIN}"
+            )
+
+
+class AcceleratedFetcher(CamoufoxFetcher):
+    """CamoufoxFetcher whose package download is resumable and multi-connection.
+
+    Every library generation calls ``download_file(temp_file, url)`` and then verifies,
+    extracts and records the install itself, so replacing just that step keeps the library's
+    own layout, checksum and metadata handling.
+    """
+
+    def __init__(self, download_dir: Path, workers: int) -> None:
+        self.download_dir = download_dir
+        self.workers = workers
+        self.archive: Path | None = None
+        super().__init__()
+
+    def download_file(self, file: IO[bytes], url: str) -> IO[bytes]:  # type: ignore[override]
+        name = Path(urlsplit(url).path).name
+        if not ARCHIVE_NAME.fullmatch(name):
+            raise RuntimeError(f"Unexpected archive name in release URL: {name!r}")
+        archive = self.download_dir / name
+        asset = OfficialAsset(url)
+        total = probe_size(asset)
+        if not archive.exists() or archive.stat().st_size != total:
+            download(asset, archive, total, self.workers)
+        try:
+            uncompressed = validate_zip(archive, total)
+        except Exception:
+            # A bad archive must not be picked up again by the next run.
+            archive.unlink(missing_ok=True)
+            raise
+        print(json.dumps({"archive_bytes": total, "uncompressed_bytes": uncompressed}))
+        # The library stages the archive in a temporary file before extracting it.
+        check_free_space([(self.download_dir, total), (INSTALL_DIR.parent, uncompressed)])
+        self.archive = archive
         with archive.open("rb") as package:
-            fetcher.extract_zip(package)
-        fetcher.set_version()
-        for path in INSTALL_DIR.rglob("*"):
-            path.chmod(path.stat().st_mode | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
-    except Exception:
-        fetcher.cleanup()
-        raise
-    executable = Path(launch_path())
-    if not executable.is_file() or not os.access(executable, os.X_OK):
-        raise RuntimeError(f"Camoufox executable is not usable: {executable}")
+            shutil.copyfileobj(package, file, length=1024 * 1024)
+        file.flush()
+        file.seek(0)
+        return file
+
+
+def resolve_fetcher(download_dir: Path, workers: int, attempts: int = 3) -> AcceleratedFetcher:
+    """Let the library pick the build; retry transient failures of its GitHub lookup.
+
+    The library tries a fallback repo after a failure and reports only the last error, so a
+    network hiccup on the first repo can surface as an unrelated 404.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return AcceleratedFetcher(download_dir, workers)
+        except requests.RequestException as exc:
+            if exc.response is not None and exc.response.status_code == 403:
+                raise SystemExit(
+                    "GitHub API rate limit exceeded while looking up the release; "
+                    "retry later or set GITHUB_TOKEN."
+                ) from exc
+            if attempt == attempts:
+                raise
+            print(f"release lookup attempt {attempt} failed ({type(exc).__name__}); retrying", flush=True)
+            time.sleep(2 * attempt)
+    raise AssertionError("unreachable")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--workers", type=int, default=24)
     parser.add_argument(
         "--download-dir", type=Path, default=Path.home() / ".cache" / "camoufox-download"
     )
     parser.add_argument("--keep-archive", action="store_true")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="show which build would be installed, then exit"
+    )
     args = parser.parse_args()
     if not 1 <= args.workers <= 32:
         parser.error("--workers must be between 1 and 32")
 
     args.download_dir.mkdir(parents=True, exist_ok=True)
-    archive = args.download_dir / ASSET_NAME
-    asset = OfficialAsset()
-    if not archive.exists() or archive.stat().st_size != EXPECTED_SIZE:
-        download(asset, archive, args.workers)
-    uncompressed_size = validate_zip(archive)
-    print(json.dumps({"archive_bytes": EXPECTED_SIZE, "uncompressed_bytes": uncompressed_size}))
-    install(archive, uncompressed_size)
-    if not args.keep_archive:
-        archive.unlink()
-    print(json.dumps({"installed": str(INSTALL_DIR), "version": f"{VERSION}-{RELEASE}"}))
+    INSTALL_DIR.parent.mkdir(parents=True, exist_ok=True)
+    # The library stages the archive in a NamedTemporaryFile; keep it off a small tmpfs /tmp.
+    tempfile.tempdir = str(args.download_dir.resolve())
+
+    fetcher = resolve_fetcher(args.download_dir, args.workers)
+    if args.dry_run:
+        size = probe_size(OfficialAsset(fetcher.url))
+        print(json.dumps({"version": fetcher.verstr, "url": fetcher.url, "archive_bytes": size}))
+        return 0
+
+    fetcher.install()
+    if fetcher.archive is not None and not args.keep_archive:
+        fetcher.archive.unlink(missing_ok=True)
+    executable = Path(launch_path())
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise RuntimeError(f"Camoufox executable is not usable: {executable}")
+    print(
+        json.dumps(
+            {
+                "installed": str(INSTALL_DIR),
+                "executable": str(executable),
+                "version": fetcher.verstr,
+            }
+        )
+    )
     return 0
 
 

@@ -72,7 +72,7 @@ fi
 
 # Stealth Reader 依赖
 cat > "$STAGE/services/stealth-reader/requirements.txt" << 'REQ_EOF'
-camoufox==0.4.11
+camoufox
 beautifulsoup4==4.13.4
 markdownify==1.2.0
 REQ_EOF
