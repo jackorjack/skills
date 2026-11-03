@@ -3,10 +3,23 @@ name: "douyin-script-imitator"
 description: "抖音/短视频脚本仿写。记忆检索企业信息后拆解原视频结构仿写3条脚本。观点类视频自动引用IP观点文案库参考。触发词：仿写、模仿、改写、借鉴、照着写、拆解、对标、链接复刻。"
 metadata:
   requires:
-    bins: [ffmpeg]
+    bins: [ffmpeg, node, npm]
   env:
     - SILICONFLOW_API_KEY
 ---
+
+## 首次使用前置检查（必读）
+
+在调用 `scripts/fetch_video_detail.js` 或 `scripts/fetch_video.js` **之前**，必须先确认依赖就绪：
+
+1. 检查 `douyin-script-imitator/node_modules/` 是否存在
+2. **不存在 → 先跑安装**（一次性，约 1-3 分钟）：
+   ```bash
+   cd skills/douyin-script-imitator && npm install && npx playwright install chromium
+   ```
+3. **已存在 → 跳过**，直接进入工作流第 1 步
+
+**不要**跳过这步直接跑脚本，会报 `Cannot find module 'playwright'`。
 
 ## 何时使用（触发条件）
 
