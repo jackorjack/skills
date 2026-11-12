@@ -16,8 +16,6 @@ FILES=(
   "SOUL.md"
   "USER.md"
   "IDENTITY.md"
-  "TOOLS.md"
-  "HEARTBEAT.md"
   "MEMORY.md"
 )
 
